@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+from collections import deque
 from sort_algo import merge_sort
 from index import InvertedIndex
 
@@ -121,37 +122,83 @@ class Repository:
         return result
 
     def ancestors(self, commit_hash):
-        """해당 커밋에서 도달 가능한 모든 조상 커밋의 hash를 반환한다.
-        부모가 최대 1개이므로 parents를 따라 단순히 위로 거슬러 올라간다."""
-        current_commit = self.commits[commit_hash]
+        """해당 커밋에서 도달 가능한 모든 조상 커밋의 hash를 빠짐없이 반환한다.
+        커밋은 부모를 0개 이상 가질 수 있으므로, 부모 하나만 따라가지 않고
+        BFS로 모든 부모 쪽 경로를 전부 탐색한다."""
+        visited = set()
+        queue = deque(self.commits[commit_hash].parents)
         ancestor_hashes = []
 
-        while current_commit.parents:
-            parent_hash = current_commit.parents[0]
-            ancestor_hashes.append(parent_hash)
-
-            current_commit = self.commits[parent_hash]
+        while queue:
+            current_hash = queue.popleft()
+            if current_hash in visited:
+                continue
+            visited.add(current_hash)
+            ancestor_hashes.append(current_hash)
+            queue.extend(self.commits[current_hash].parents)
 
         return ancestor_hashes
 
+    def _build_undirected_adjacency(self):
+        """커밋-부모 연결을 방향 없는 간선으로 간주한 인접 리스트를 만든다.
+        PATH의 최단 경로 탐색에서 쓰인다."""
+        adjacency = {h: [] for h in self.commits}
+        for c in self.commits.values():
+            for parent_hash in c.parents:
+                adjacency[c.hash].append(parent_hash)
+                adjacency[parent_hash].append(c.hash)
+        return adjacency
+
+    def _bfs_distances(self, adjacency, start):
+        """start로부터 각 커밋까지의 최단 거리(간선 수)를 BFS로 계산해 반환한다."""
+        distances = {start: 0}
+        queue = deque([start])
+
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if neighbor not in distances:
+                    distances[neighbor] = distances[current] + 1
+                    queue.append(neighbor)
+
+        return distances
+
     def path(self, hash1, hash2):
-        """hash1에서 hash2까지 이어지는 경로를 찾는다.
-        두 체인이 처음 만나는 지점(LCA)을 기준으로 절반씩 이어붙인다."""
-        chain1 = [hash1] + self.ancestors(hash1)
-        chain2 = [hash2] + self.ancestors(hash2)
+        """hash1과 hash2 사이의 최단 경로를 찾는다.
+        커밋-부모 연결을 무방향 간선으로 보고 BFS로 최단 거리를 구하고,
+        최단 경로가 여러 개면 사전순으로 가장 작은 경로를 선택한다."""
+        adjacency = self._build_undirected_adjacency()
+        dist_from_1 = self._bfs_distances(adjacency, hash1)
+        dist_from_2 = self._bfs_distances(adjacency, hash2)
 
-        lca = None
-        for node in chain1:
-            if node in chain2:
-                lca = node
-                break
+        if hash2 not in dist_from_1:
+            return "No path"
 
-        idx1 = chain1.index(lca)
-        idx2 = chain2.index(lca)
+        total_distance = dist_from_1[hash2]
 
-        full_path = chain1[:idx1 + 1] + chain2[:idx2][::-1]
+        path_nodes = [hash1]
+        current = hash1
 
-        return "Path: " + " -> ".join(full_path)
+        while current != hash2:
+            remaining = total_distance - dist_from_1[current] - 1
+
+            # 최단 경로 위에 있는 다음 후보들을 전부 모은다.
+            candidates = []
+            for neighbor in adjacency[current]:
+                if (dist_from_1.get(neighbor) == dist_from_1[current] + 1
+                        and dist_from_2.get(neighbor) == remaining):
+                    candidates.append(neighbor)
+
+            # sorted()/list.sort() 없이, 후보 중 사전순으로 가장 작은 것을 직접 고른다.
+            next_node = candidates[0]
+            for candidate in candidates[1:]:
+                if candidate < next_node:
+                    next_node = candidate
+
+            path_nodes.append(next_node)
+            current = next_node
+
+        return "Path: " + " -> ".join(path_nodes)
 
     def search(self, keyword=None, author=None):
         """키워드 또는 author로 커밋을 검색해 결과를 문자열로 반환한다."""
